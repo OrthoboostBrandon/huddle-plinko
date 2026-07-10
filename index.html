@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Huddle Plinko Race — Last One Leads</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: radial-gradient(circle at 50% 0%, #1b2a4a 0%, #0d1526 70%);
+    color: #f2f6ff;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px 48px;
+  }
+  h1 { font-size: 26px; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .sub { color: #8fa6cc; font-size: 14px; margin-bottom: 20px; }
+  .layout { display: flex; gap: 28px; flex-wrap: wrap; justify-content: center; align-items: flex-start; }
+  .panel {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 14px;
+    padding: 18px;
+    width: 280px;
+  }
+  .panel h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 1px; color: #7fd4c1; margin-bottom: 12px; }
+  textarea {
+    width: 100%; height: 180px; resize: vertical;
+    background: #0c1424; color: #eaf1ff;
+    border: 1px solid rgba(255,255,255,0.12); border-radius: 8px;
+    padding: 10px; font-size: 14px; line-height: 1.6;
+  }
+  button {
+    cursor: pointer; border: none; border-radius: 8px;
+    font-size: 15px; font-weight: 600; padding: 12px 16px;
+    width: 100%; margin-top: 12px; transition: transform .08s, filter .15s;
+  }
+  button:active { transform: scale(0.98); }
+  .drop { background: linear-gradient(135deg,#4ee1c1,#3aa0ff); color: #06202b; }
+  .drop:disabled { filter: grayscale(0.6) brightness(0.7); cursor: not-allowed; }
+  .ghost { background: rgba(255,255,255,0.08); color: #cfe0ff; }
+  canvas { background: linear-gradient(180deg,#0f1a30,#0a1120); border-radius: 14px; display: block; }
+  .winner {
+    margin-top: 16px; font-size: 22px; font-weight: 700; min-height: 30px;
+    text-align: center; color: #ffe27a;
+  }
+  .order { margin-top: 10px; font-size: 13px; color: #9fb4d8; text-align: center; min-height: 18px; }
+  .hint { color: #6f85a8; font-size: 12px; margin-top: 10px; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <h1>🦷 Huddle Plinko Race</h1>
+  <div class="sub">Every name gets a ball. Last one across the finish line leads the next huddle.</div>
+
+  <div class="layout">
+    <div class="panel">
+      <h2>Team</h2>
+      <textarea id="names" placeholder="One name per line">Brandon
+Sarah
+Marcus
+Priya
+Devon
+Lena</textarea>
+      <button class="drop" id="dropBtn">Start the race</button>
+      <button class="ghost" id="resetBtn">Reset board</button>
+      <div class="hint">Add up to 8 names. Camera follows the lead ball. Being fast is bad here: the very last ball to cross the finish line has to lead.</div>
+    </div>
+
+    <div>
+      <canvas id="board" width="560" height="640"></canvas>
+      <div class="winner" id="winner"></div>
+      <div class="order" id="order"></div>
+    </div>
+  </div>
+
+<script>
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const VW = canvas.width, VH = canvas.height;
+const WORLD_W = VW;
+const WORLD_H = 3400;
+const namesEl = document.getElementById('names');
+const dropBtn = document.getElementById('dropBtn');
+const resetBtn = document.getElementById('resetBtn');
+const winnerEl = document.getElementById('winner');
+const orderEl = document.getElementById('order');
+
+const BALL_R = 10;
+const FINISH_Y = WORLD_H - 120;
+const ballColors = ['#4ee1c1','#3aa0ff','#ff8fb3','#ffd166','#b78bff','#7bd88f','#ff9f68','#69d6ff'];
+
+let obstacles = [];
+let balls = [];
+let animating = false;
+let cameraY = 0;
+let t = 0;
+let finishOrder = [];   // names in order they crossed
+
+function getNames() {
+  return namesEl.value.split('\n').map(s => s.trim()).filter(Boolean).slice(0, 8);
+}
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+// Randomly assembled course. Bands are stacked top to bottom; each band's
+// type is chosen at random so no two races look the same.
+function buildBoard() {
+  obstacles = [];
+  const bandTypes = ['pegs', 'bumpers', 'spinners', 'movers', 'ramps', 'mixed',
+                     'portal', 'pinwheel', 'gates'];
+  let y = 170;
+  const bottomLimit = FINISH_Y - 130;
+  while (y < bottomLimit) {
+    const type = pick(bandTypes);
+    if (type === 'pegs') {
+      const rows = Math.floor(rand(3, 6));
+      addPegRows(y, rows, Math.floor(rand(6, 10)), rand(52, 64));
+      y += rows * 60 + 40;
+    } else if (type === 'bumpers') {
+      addBumperCluster(y + 60);
+      y += 200;
+    } else if (type === 'spinners') {
+      const count = Math.floor(rand(1, 4));
+      for (let i = 0; i < count; i++) {
+        obstacles.push({ type: 'spinner', x: rand(120, WORLD_W - 120), y: y + 70,
+          len: rand(65, 95), speed: rand(0.03, 0.06) * (Math.random() < 0.5 ? 1 : -1), phase: rand(0, 6) });
+      }
+      y += 200;
+    } else if (type === 'movers') {
+      const n = Math.floor(rand(4, 6));
+      for (let i = 0; i < n; i++) {
+        const bx = 80 + i * (WORLD_W - 160) / (n - 1);
+        obstacles.push({ type: 'mover', baseX: bx, y: y + 60, amp: rand(40, 70), speed: rand(0.015, 0.03), phase: rand(0, 6), _x: bx });
+      }
+      y += 170;
+    } else if (type === 'ramps') {
+      const dir = Math.random() < 0.5;
+      obstacles.push({ type: 'wall', x1: dir ? 30 : WORLD_W - 30, y1: y + 20, x2: WORLD_W / 2 + rand(-60, 60), y2: y + rand(90, 140) });
+      obstacles.push({ type: 'wall', x1: dir ? WORLD_W - 30 : 30, y1: y + 60, x2: WORLD_W / 2 + rand(-60, 60), y2: y + rand(130, 180) });
+      y += 200;
+    } else if (type === 'portal') {
+      // warps the ball elsewhere: sometimes back up the board, sometimes a shortcut down
+      const ex = rand(90, WORLD_W - 90);
+      const goUp = Math.random() < 0.55;
+      const dist = rand(240, 460);
+      let ty = goUp ? (y + 70 - dist) : (y + 70 + dist);
+      ty = Math.max(120, Math.min(ty, FINISH_Y - 90));
+      obstacles.push({ type: 'portal', x: rand(90, WORLD_W - 90), y: y + 70, r: 26, tx: ex, ty, dir: goUp ? 'up' : 'down' });
+      y += 200;
+    } else if (type === 'pinwheel') {
+      obstacles.push({ type: 'pinwheel', x: rand(140, WORLD_W - 140), y: y + 80,
+        len: rand(70, 100), arms: Math.floor(rand(3, 5)), speed: rand(0.03, 0.055) * (Math.random() < 0.5 ? 1 : -1), phase: rand(0, 6) });
+      y += 210;
+    } else if (type === 'trampoline') {
+      const n = Math.floor(rand(2, 4));
+      for (let i = 0; i < n; i++) {
+        const tx = 70 + i * (WORLD_W - 140) / (n - 1 || 1);
+        obstacles.push({ type: 'tramp', x: tx, y: y + rand(40, 100), w: rand(50, 80) });
+      }
+      y += 180;
+    } else if (type === 'gates') {
+      // two horizontal bars sliding opposite ways, leaving shifting gaps
+      obstacles.push({ type: 'gate', y: y + 50, w: 150, baseX: rand(120, WORLD_W - 120), amp: rand(80, 140), speed: rand(0.02, 0.035), phase: 0, _x: 0 });
+      obstacles.push({ type: 'gate', y: y + 130, w: 150, baseX: rand(120, WORLD_W - 120), amp: rand(80, 140), speed: rand(0.02, 0.035), phase: 3, _x: 0 });
+      y += 210;
+    } else { // mixed
+      addPegRows(y, 2, Math.floor(rand(6, 9)), 58);
+      obstacles.push({ type: 'bumper', x: rand(120, WORLD_W - 120), y: y + 130, r: 20 });
+      obstacles.push({ type: 'spinner', x: rand(120, WORLD_W - 120), y: y + 130, len: rand(60, 85), speed: rand(0.03, 0.06) * (Math.random() < 0.5 ? 1 : -1), phase: rand(0, 6) });
+      y += 210;
+    }
+  }
+  // funnel ramps into the finish line every time
+  obstacles.push({ type: 'wall', x1: 20, y1: FINISH_Y - 110, x2: 150, y2: FINISH_Y - 10 });
+  obstacles.push({ type: 'wall', x1: WORLD_W - 20, y1: FINISH_Y - 110, x2: WORLD_W - 150, y2: FINISH_Y - 10 });
+}
+
+function addPegRows(startY, rows, cols, rowGap) {
+  for (let r = 0; r < rows; r++) {
+    const y = startY + r * rowGap;
+    const offset = (r % 2) ? (WORLD_W / (cols + 1)) / 2 : 0;
+    const gap = WORLD_W / (cols + 1);
+    for (let c = 0; c < cols; c++) {
+      const x = gap * (c + 1) + offset;
+      if (x > 15 && x < WORLD_W - 15) obstacles.push({ type: 'peg', x, y, r: 5 });
+    }
+  }
+}
+function addBumperCluster(cy) {
+  [[140, cy], [280, cy - 40], [420, cy], [210, cy + 60], [350, cy + 60]]
+    .forEach(([x, y]) => obstacles.push({ type: 'bumper', x, y, r: 20 }));
+}
+
+function spawnBalls() {
+  const names = getNames();
+  balls = names.map((name, i) => ({
+    name,
+    color: ballColors[i % ballColors.length],
+    x: (WORLD_W / (names.length + 1)) * (i + 1) + (Math.random() - 0.5) * 20,
+    y: 30 + (i % 2) * 26,
+    vx: (Math.random() - 0.5) * 2,
+    vy: 0,
+    finished: false,
+    warpCd: 0,
+    bestY: 0,        // deepest point reached
+    stuckFrames: 0   // frames without downward progress
+  }));
+}
+
+// ---------- drawing ----------
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function draw() {
+  ctx.clearRect(0, 0, VW, VH);
+  ctx.save();
+  ctx.translate(0, -cameraY);
+
+  for (let y = 200; y < WORLD_H; y += 200) {
+    if (y - cameraY < -20 || y - cameraY > VH + 20) continue;
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(WORLD_W, y); ctx.stroke();
+  }
+
+  obstacles.forEach(o => {
+    if (o.type === 'peg') {
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.beginPath(); ctx.arc(o.x, o.y, o.r, 0, Math.PI * 2); ctx.fill();
+    } else if (o.type === 'bumper') {
+      ctx.fillStyle = '#ff6f91'; ctx.shadowColor = '#ff6f91'; ctx.shadowBlur = 12;
+      ctx.beginPath(); ctx.arc(o.x, o.y, o.r, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.beginPath(); ctx.arc(o.x, o.y, o.r * 0.5, 0, Math.PI * 2); ctx.fill();
+    } else if (o.type === 'wall') {
+      ctx.strokeStyle = '#5cc8ff'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(o.x1, o.y1); ctx.lineTo(o.x2, o.y2); ctx.stroke(); ctx.lineWidth = 1;
+    } else if (o.type === 'spinner') {
+      const a = o.phase + t * o.speed;
+      ctx.strokeStyle = '#b78bff'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(o.x + Math.cos(a) * o.len, o.y + Math.sin(a) * o.len);
+      ctx.lineTo(o.x - Math.cos(a) * o.len, o.y - Math.sin(a) * o.len);
+      ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(o.x, o.y, 5, 0, Math.PI*2); ctx.fill(); ctx.lineWidth = 1;
+    } else if (o.type === 'mover') {
+      ctx.fillStyle = '#7bd88f';
+      ctx.beginPath(); ctx.arc(o._x, o.y, 7, 0, Math.PI * 2); ctx.fill();
+    } else if (o.type === 'portal') {
+      // exit (up) in orange, entrance (down) in cyan, dashed link
+      ctx.setLineDash([6, 6]); ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(o.x, o.y); ctx.lineTo(o.tx, o.ty); ctx.stroke();
+      ctx.setLineDash([]); ctx.lineWidth = 1;
+      const pulse = 3 + Math.sin(t * 0.1) * 2;
+      // entrance
+      ctx.strokeStyle = '#39d0ff'; ctx.lineWidth = 4; ctx.shadowColor = '#39d0ff'; ctx.shadowBlur = 16;
+      ctx.beginPath(); ctx.arc(o.x, o.y, o.r + pulse, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(o.x, o.y, o.r - 6, 0, Math.PI * 2); ctx.stroke();
+      // exit: orange + ▲ if it sends you up, green + ▼ if it's a downward shortcut
+      const up = o.dir === 'up';
+      const exitCol = up ? '#ff9f45' : '#7bd88f';
+      ctx.strokeStyle = exitCol; ctx.shadowColor = exitCol;
+      ctx.beginPath(); ctx.arc(o.tx, o.ty, o.r + pulse, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(o.tx, o.ty, o.r - 6, 0, Math.PI * 2); ctx.stroke();
+      ctx.shadowBlur = 0; ctx.lineWidth = 1;
+      ctx.fillStyle = exitCol; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(up ? '▲ warp' : '▼ warp', o.x, o.y + 3);
+    } else if (o.type === 'pinwheel') {
+      const base = o.phase + t * o.speed;
+      ctx.strokeStyle = '#ff7ce0'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+      ctx.shadowColor = '#ff7ce0'; ctx.shadowBlur = 8;
+      for (let a = 0; a < o.arms; a++) {
+        const ang = base + a * (Math.PI * 2 / o.arms);
+        ctx.beginPath(); ctx.moveTo(o.x, o.y);
+        ctx.lineTo(o.x + Math.cos(ang) * o.len, o.y + Math.sin(ang) * o.len); ctx.stroke();
+      }
+      ctx.shadowBlur = 0; ctx.lineWidth = 1;
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(o.x, o.y, 6, 0, Math.PI*2); ctx.fill();
+    } else if (o.type === 'tramp') {
+      ctx.strokeStyle = '#ffe27a'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+      ctx.shadowColor = '#ffe27a'; ctx.shadowBlur = 10;
+      ctx.beginPath(); ctx.moveTo(o.x - o.w, o.y); ctx.lineTo(o.x + o.w, o.y); ctx.stroke();
+      ctx.shadowBlur = 0; ctx.lineWidth = 1;
+    } else if (o.type === 'gate') {
+      ctx.fillStyle = '#5cc8ff'; ctx.shadowColor = '#5cc8ff'; ctx.shadowBlur = 6;
+      roundRect(o._x - o.w / 2, o.y - 7, o.w, 14, 6); ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+  });
+
+  // finish line (checkered)
+  const sq = 20, rows = 2;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < WORLD_W / sq; c++) {
+      ctx.fillStyle = ((r + c) % 2) ? '#f2f6ff' : '#12203a';
+      ctx.fillRect(c * sq, FINISH_Y + r * sq, sq, sq);
+    }
+  }
+  ctx.fillStyle = '#ffe27a'; ctx.font = 'bold 16px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('🏁 FINISH LINE', WORLD_W / 2, FINISH_Y - 14);
+
+  // balls
+  balls.forEach(b => {
+    ctx.fillStyle = b.color;
+    ctx.shadowColor = b.color; ctx.shadowBlur = 14;
+    ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    // readable label: dark outline + bright fill in the ball's own color
+    const label = b.name.slice(0, 10);
+    ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+    ctx.strokeText(label, b.x, b.y - BALL_R - 6);
+    ctx.fillStyle = b.color;
+    ctx.fillText(label, b.x, b.y - BALL_R - 6);
+  });
+
+  ctx.restore();
+}
+
+// ---------- physics ----------
+function bounceCircle(b, px, py, pr, kick) {
+  const dx = b.x - px, dy = b.y - py;
+  const dist = Math.hypot(dx, dy) || 0.001;
+  const min = pr + BALL_R;
+  if (dist < min) {
+    const ang = Math.atan2(dy, dx);
+    b.x = px + Math.cos(ang) * min;
+    b.y = py + Math.sin(ang) * min;
+    const nudge = (Math.random() - 0.5) * 2.0;
+    b.vx = Math.cos(ang) * kick + nudge;
+    b.vy = Math.max(Math.sin(ang) * kick, -kick) + 0.4;
+  }
+}
+function bounceSegment(b, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len2 = dx*dx + dy*dy;
+  let tt = ((b.x - x1) * dx + (b.y - y1) * dy) / len2;
+  tt = Math.max(0, Math.min(1, tt));
+  const cx = x1 + tt * dx, cy = y1 + tt * dy;
+  const ddx = b.x - cx, ddy = b.y - cy;
+  const dist = Math.hypot(ddx, ddy) || 0.001;
+  if (dist < BALL_R + 3) {
+    const nx = ddx / dist, ny = ddy / dist;
+    b.x = cx + nx * (BALL_R + 3); b.y = cy + ny * (BALL_R + 3);
+    const dot = b.vx * nx + b.vy * ny;
+    b.vx = (b.vx - 2 * dot * nx) * 0.7;
+    b.vy = (b.vy - 2 * dot * ny) * 0.7;
+  }
+}
+
+function ballBallCollisions() {
+  for (let i = 0; i < balls.length; i++) {
+    for (let j = i + 1; j < balls.length; j++) {
+      const a = balls[i], b = balls[j];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.hypot(dx, dy) || 0.001;
+      const min = BALL_R * 2;
+      if (dist < min) {
+        const nx = dx / dist, ny = dy / dist;
+        const overlap = (min - dist) / 2;
+        a.x -= nx * overlap; a.y -= ny * overlap;
+        b.x += nx * overlap; b.y += ny * overlap;
+        const avn = a.vx * nx + a.vy * ny;
+        const bvn = b.vx * nx + b.vy * ny;
+        const diff = bvn - avn;
+        a.vx += nx * diff; a.vy += ny * diff;
+        b.vx -= nx * diff; b.vy -= ny * diff;
+      }
+    }
+  }
+}
+
+function step() {
+  t++;
+  // update movers/spinner positions used in physics
+  obstacles.forEach(o => {
+    if (o.type === 'mover') o._x = o.baseX + Math.sin(o.phase + t * o.speed) * o.amp;
+    else if (o.type === 'gate') o._x = o.baseX + Math.sin(o.phase + t * o.speed) * o.amp;
+  });
+
+  balls.forEach(b => {
+    if (b.finished) return;
+    if (b.warpCd > 0) b.warpCd--;
+    b.vy += 0.16;
+    b.vx *= 0.99;
+    b.vy = Math.min(b.vy, 4.6);
+    b.x += b.vx;
+    b.y += b.vy;
+
+    obstacles.forEach(o => {
+      if (o.type === 'peg') bounceCircle(b, o.x, o.y, o.r, 1.7);
+      else if (o.type === 'bumper') bounceCircle(b, o.x, o.y, o.r, 3.6);
+      else if (o.type === 'mover') bounceCircle(b, o._x, o.y, 7, 2.0);
+      else if (o.type === 'wall') bounceSegment(b, o.x1, o.y1, o.x2, o.y2);
+      else if (o.type === 'spinner') {
+        const a = o.phase + t * o.speed;
+        bounceSegment(b, o.x + Math.cos(a)*o.len, o.y + Math.sin(a)*o.len,
+                         o.x - Math.cos(a)*o.len, o.y - Math.sin(a)*o.len);
+      }
+      else if (o.type === 'pinwheel') {
+        const base = o.phase + t * o.speed;
+        for (let a = 0; a < o.arms; a++) {
+          const ang = base + a * (Math.PI * 2 / o.arms);
+          bounceSegment(b, o.x, o.y, o.x + Math.cos(ang) * o.len, o.y + Math.sin(ang) * o.len);
+        }
+      }
+      else if (o.type === 'tramp') {
+        // bounce hard upward when hit from above
+        if (Math.abs(b.x - o.x) < o.w && b.y + BALL_R > o.y && b.y < o.y + 12 && b.vy > 0) {
+          b.y = o.y - BALL_R;
+          b.vy = -Math.max(3.2, b.vy * 0.9);
+        }
+      }
+      else if (o.type === 'gate') {
+        bounceSegment(b, o._x - o.w / 2, o.y, o._x + o.w / 2, o.y);
+      }
+      else if (o.type === 'portal') {
+        const d = Math.hypot(b.x - o.x, b.y - o.y);
+        if (d < o.r && b.warpCd === 0) {
+          b.x = o.tx + (Math.random() - 0.5) * 10;
+          b.y = o.ty;
+          b.vx = (Math.random() - 0.5) * 1.5;
+          b.vy = 0.5;
+          b.warpCd = 90;   // avoid immediate re-warp
+        }
+      }
+    });
+
+    if (b.x < BALL_R) { b.x = BALL_R; b.vx = Math.abs(b.vx); }
+    if (b.x > WORLD_W - BALL_R) { b.x = WORLD_W - BALL_R; b.vx = -Math.abs(b.vx); }
+
+    // anti-stuck: if no meaningful downward progress for ~3s, warp upward and shove free
+    if (b.y > b.bestY + 4) { b.bestY = b.y; b.stuckFrames = 0; }
+    else { b.stuckFrames++; }
+    if (b.stuckFrames > 180) {
+      b.y = Math.max(120, b.y - 160);
+      b.x = Math.min(WORLD_W - BALL_R, Math.max(BALL_R, b.x + rand(-60, 60)));
+      b.vx = rand(-2.5, 2.5);
+      b.vy = 1;
+      b.stuckFrames = 0;
+      b.bestY = b.y;
+      b.warpCd = 30;
+    }
+
+    if (b.y >= FINISH_Y && !b.finished) {
+      b.finished = true;
+      finishOrder.push(b.name);
+      updateOrder();
+    }
+  });
+
+  ballBallCollisions();
+
+  // camera follows the LEAD ball (furthest down that hasn't finished; else furthest overall)
+  const running = balls.filter(b => !b.finished);
+  const lead = (running.length ? running : balls).reduce((m, b) => b.y > m.y ? b : m, (running.length ? running : balls)[0]);
+  if (lead) {
+    const target = lead.y - VH * 0.4;
+    cameraY += (target - cameraY) * 0.12;
+    cameraY = Math.max(0, Math.min(cameraY, WORLD_H - VH));
+  }
+
+  draw();
+
+  if (balls.every(b => b.finished)) { finish(); return; }
+  requestAnimationFrame(step);
+}
+
+function updateOrder() {
+  if (finishOrder.length) {
+    orderEl.textContent = 'Crossed: ' + finishOrder.join(' → ');
+  }
+}
+
+function finish() {
+  animating = false;
+  dropBtn.disabled = false;
+  const loser = finishOrder[finishOrder.length - 1];
+  winnerEl.textContent = `⭐ ${loser} leads the next huddle!`;
+  // snap camera to finish so everyone sees the line
+  draw();
+}
+
+function start() {
+  if (animating) return;
+  buildBoard();
+  spawnBalls();
+  finishOrder = [];
+  winnerEl.textContent = '';
+  orderEl.textContent = '';
+  t = 0; cameraY = 0;
+  animating = true;
+  dropBtn.disabled = true;
+  step();
+}
+
+dropBtn.addEventListener('click', start);
+resetBtn.addEventListener('click', () => {
+  animating = false; balls = []; finishOrder = [];
+  winnerEl.textContent = ''; orderEl.textContent = '';
+  cameraY = 0; t = 0; buildBoard(); spawnBalls();
+  balls.forEach(b => b.vy = 0); draw();
+});
+namesEl.addEventListener('input', () => { if (!animating) { buildBoard(); spawnBalls(); draw(); } });
+
+// idle so spinners/movers animate before start
+function idle() {
+  if (!animating) {
+    t++;
+    obstacles.forEach(o => {
+      if (o.type === 'mover' || o.type === 'gate') o._x = o.baseX + Math.sin(o.phase + t * o.speed) * o.amp;
+    });
+    cameraY = 0; draw();
+  }
+  requestAnimationFrame(idle);
+}
+
+buildBoard();
+spawnBalls();
+draw();
+idle();
+</script>
+</body>
+</html>
